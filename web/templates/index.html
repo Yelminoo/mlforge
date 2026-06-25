@@ -152,6 +152,7 @@ select:focus,input:focus{outline:none;border-color:var(--blue)}
     <button class="navbtn" onclick="showPanel('train')"><span class="icon">▶</span>Train</button>
     <button class="navbtn" onclick="showPanel('eval')"><span class="icon">◎</span>Evaluate</button>
     <button class="navbtn" onclick="showPanel('deploy')"><span class="icon">⬆</span>Deploy</button>
+    <button class="navbtn" onclick="showPanel('jobs')"><span class="icon">☰</span>Jobs <span id="jobs-badge" style="margin-left:auto;font-size:10px;background:var(--blue2);color:var(--blue);padding:1px 6px;border-radius:8px;display:none"></span></button>
     <div class="nav-section" style="margin-top:16px">Status</div>
     <div class="pipeline-dots">
       <div class="pdot active" id="pd-model">Base model</div>
@@ -426,6 +427,43 @@ select:focus,input:focus{outline:none;border-color:var(--blue)}
         <div class="log-panel" id="deploy-log"></div>
       </div>
       <div class="actions"><button class="btn" onclick="showPanel('eval')">← Back</button></div>
+    </div>
+
+    <!-- JOBS -->
+    <div class="panel" id="panel-jobs">
+      <div class="panel-head"><span class="ph-icon">☰</span>Parallel jobs</div>
+
+      <div class="card">
+        <div class="card-title">Submit new job</div>
+        <div class="field-grid two" style="margin-bottom:10px">
+          <div class="field"><label>Job name</label><input type="text" id="job-name" placeholder="Run A — lr=1e-4"/></div>
+          <div class="field"><label>Epochs</label><input type="number" id="job-epochs" value="5"/></div>
+        </div>
+        <div class="field-grid three" style="margin-bottom:10px">
+          <div class="field"><label>Learning rate</label><input type="text" id="job-lr" value="1e-4"/></div>
+          <div class="field"><label>LoRA rank</label><input type="number" id="job-lora-rank" value="16"/></div>
+          <div class="field"><label>LoRA alpha</label><input type="number" id="job-lora-alpha" value="32"/></div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" onclick="submitJob()">+ Submit job</button>
+          <button class="btn" onclick="submitJob('Run B','32','1e-5','8')">+ Quick: low-rank variant</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;gap:8px">
+          Running jobs
+          <button class="btn" style="margin-left:auto;padding:4px 10px;font-size:11px" onclick="loadJobs()">↺ Refresh</button>
+        </div>
+        <div id="jobs-list" style="display:flex;flex-direction:column;gap:8px">
+          <div style="color:var(--text3);font-size:13px">No jobs yet — submit one above</div>
+        </div>
+      </div>
+
+      <div class="card" id="job-log-card" style="display:none">
+        <div class="card-title" id="job-log-title">Job log</div>
+        <div class="log-panel" id="job-log-panel" style="max-height:320px"></div>
+      </div>
     </div>
 
   </content>
@@ -979,9 +1017,103 @@ fetch('/api/config/default').catch(()=>{
   document.getElementById('gpu-badge').textContent='GPU: demo mode';
 });
 
+// ── Jobs ─────────────────────────────────────────────────────────────────────
+
+const JOB_STATUS_COLOR = {
+  pending:'var(--text3)', running:'var(--blue)',
+  done:'var(--green)', failed:'var(--red)', cancelled:'var(--amber)'
+};
+let _activeJobStream = null;
+
+function submitJob(nameOverride, loraRankOverride, lrOverride, loraAlphaOverride) {
+  const body = {
+    name:          nameOverride || document.getElementById('job-name').value || `Run ${Date.now()}`,
+    model_id:      document.getElementById('custom-model').value || selectedModel || 'black-forest-labs/FLUX.1-dev',
+    dataset_id:    document.getElementById('dataset-id').value || 'laion/laion2B-en-aesthetic',
+    method:        document.getElementById('train-method').value,
+    epochs:        parseInt(document.getElementById('job-epochs').value)||5,
+    learning_rate: parseFloat(lrOverride || document.getElementById('job-lr').value)||1e-4,
+    lora_rank:     parseInt(loraRankOverride || document.getElementById('job-lora-rank').value)||16,
+    lora_alpha:    parseInt(loraAlphaOverride || document.getElementById('job-lora-alpha').value)||32,
+  };
+  fetch('/api/jobs/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+  .then(r=>r.json()).then(d=>{
+    loadJobs();
+    streamJobLog(d.job_id, body.name);
+  }).catch(e=>alert('Submit failed: '+e));
+}
+
+function loadJobs() {
+  fetch('/api/jobs').then(r=>r.json()).then(jobs=>{
+    const running = jobs.filter(j=>j.status==='running').length;
+    const badge = document.getElementById('jobs-badge');
+    if(running > 0){ badge.textContent=running+' running'; badge.style.display=''; }
+    else badge.style.display='none';
+
+    if(!jobs.length){
+      document.getElementById('jobs-list').innerHTML='<div style="color:var(--text3);font-size:13px">No jobs yet</div>';
+      return;
+    }
+    document.getElementById('jobs-list').innerHTML = jobs.map(j=>`
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;display:flex;align-items:center;gap:12px;cursor:pointer"
+           onclick="streamJobLog('${j.id}','${j.name}')">
+        <div style="width:8px;height:8px;border-radius:50%;background:${JOB_STATUS_COLOR[j.status]||'var(--text3)'};flex-shrink:0"></div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:500">${j.name}</div>
+          <div style="font-size:11px;color:var(--text3)">${j.id} · ${j.config.method||'lora'} · ${j.config.epochs||5} epochs · lr=${j.config.learning_rate||'1e-4'}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:11px;color:${JOB_STATUS_COLOR[j.status]}">${j.status}</span>
+          ${j.status==='running'?`<button class="btn" style="padding:2px 8px;font-size:11px" onclick="event.stopPropagation();cancelJob('${j.id}')">■ Stop</button>`:''}
+          ${j.log.length?`<span style="font-size:10px;color:var(--text3)">${j.log.length} lines</span>`:''}
+        </div>
+      </div>`).join('');
+  });
+}
+
+function streamJobLog(jobId, name) {
+  if(_activeJobStream){ _activeJobStream.cancel(); _activeJobStream=null; }
+  const card = document.getElementById('job-log-card');
+  const box  = document.getElementById('job-log-panel');
+  document.getElementById('job-log-title').textContent = `Log — ${name||jobId}`;
+  card.style.display='block'; box.innerHTML='';
+
+  fetch(`/api/jobs/${jobId}/stream`)
+  .then(async res=>{
+    const reader=res.body.getReader(); _activeJobStream=reader;
+    const dec=new TextDecoder(); let buf='';
+    while(true){
+      const{done,value}=await reader.read(); if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const parts=buf.split('\n\n'); buf=parts.pop();
+      for(const chunk of parts){
+        const lines=chunk.split('\n'); let evtName='message',data='';
+        for(const l of lines){
+          if(l.startsWith('event: '))evtName=l.slice(7);
+          if(l.startsWith('data: '))data=l.slice(6);
+        }
+        if(!data)continue;
+        try{
+          const d=JSON.parse(data);
+          if(evtName==='done'){ addLog('job-log-panel',d.status==='done'?'ok':'error',`Job ${d.status}`); loadJobs(); }
+          else if(evtName==='log'){ addLog('job-log-panel',d.status||'info',d.message); }
+        }catch(e){}
+      }
+    }
+  }).catch(e=>addLog('job-log-panel','error','Stream error: '+e));
+}
+
+function cancelJob(jobId){
+  fetch(`/api/jobs/${jobId}`,{method:'DELETE'}).then(()=>loadJobs());
+}
+
+// Poll running jobs every 5s to keep badge updated
+setInterval(()=>{ if(document.getElementById('panel-jobs').classList.contains('active')) loadJobs(); }, 5000);
+
 // init
 renderModels(); renderDatasets();
 selectDeploy('hf', document.getElementById('dp-hf'));
+loadJobs();
 </script>
 </body>
 </html>
