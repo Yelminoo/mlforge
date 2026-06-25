@@ -127,7 +127,7 @@ def _run_training_job(job_id: str, config: dict, q: multiprocessing.Queue):
             emit("info", f"Downloading {model_id}…")
             snapshot_download(model_id,
                               token=config.get("hf_token") or None,
-                              ignore_patterns=["*.msgpack","*.h5","flax_model*"])
+                              ignore_patterns=["*.msgpack","*.h5","flax_model*","*.ckpt","*.bin","*.png","*.jpg","*.jpeg","*.gif","*.webp"])
             emit("ok", "Model downloaded")
 
             emit("info", "Loading model on CPU…")
@@ -703,7 +703,7 @@ async def cpu_train_stream(req: CloudTrainRequest):
                         model_id,
                         tqdm_class=_HookTqdm,
                         token=req.hf_token or None,
-                        ignore_patterns=["*.msgpack", "*.h5", "flax_model*"],
+                        ignore_patterns=["*.msgpack","*.h5","flax_model*","*.ckpt","*.bin","*.png","*.jpg","*.jpeg","*.gif","*.webp"],
                     )
                 except Exception as e:
                     dl_error["err"] = e
@@ -874,7 +874,7 @@ async def multi_adapter_stream(req: MultiAdapterRequest):
                 q.put(("info", f"Downloading base model: {model_id}"))
                 snapshot_download(model_id,
                                   token=req.hf_token or None,
-                                  ignore_patterns=["*.msgpack","*.h5","flax_model*"])
+                                  ignore_patterns=["*.msgpack","*.h5","flax_model*","*.ckpt","*.bin","*.png","*.jpg","*.jpeg","*.gif","*.webp"])
                 q.put(("ok", "Base model downloaded"))
 
                 q.put(("info", "Loading base model on CPU…"))
@@ -1018,7 +1018,7 @@ async def merge_lora_stream(req: LoraMergeRequest):
 
                 q.put(("info", f"Loading base model: {model_id}"))
                 snapshot_download(model_id, token=req.hf_token or None,
-                                  ignore_patterns=["*.msgpack","*.h5","flax_model*"])
+                                  ignore_patterns=["*.msgpack","*.h5","flax_model*","*.ckpt","*.bin","*.png","*.jpg","*.jpeg","*.gif","*.webp"])
                 pipe = StableDiffusionPipeline.from_pretrained(
                     model_id, torch_dtype=torch.float32,
                     local_files_only=True, safety_checker=None)
