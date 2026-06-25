@@ -1,0 +1,39 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# model output & cache
+output/
+*.safetensors
+*.ckpt
+*.pt
+*.bin
+train_modal.py
+
+# HF cache
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# screenshots & temp
+*.png
+*.jpg
+
+# flat source copies (real source is in cli/ core/ web/)
+/app.py
+/mlforge.py
+/pipeline.py
+/index.html
