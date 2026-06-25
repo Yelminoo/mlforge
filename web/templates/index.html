@@ -319,6 +319,25 @@ select:focus,input:focus{outline:none;border-color:var(--blue)}
         </div>
       </div>
 
+      <!-- Option B: Multi-adapter -->
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;gap:8px">
+          Multi-adapter training
+          <span style="font-size:10px;background:var(--blue2);color:var(--blue);padding:2px 7px;border-radius:8px;font-weight:600">OPTION B</span>
+          <button class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleMultiAdapter()">+ Add adapter</button>
+        </div>
+        <div style="font-size:12px;color:var(--text3);margin-bottom:10px">Train multiple named LoRA adapters on one loaded model. Each adapter targets different modules or datasets — avoids reloading the base model each time.</div>
+        <div id="adapter-list" style="display:flex;flex-direction:column;gap:8px"></div>
+        <div id="multi-adapter-controls" style="display:none;margin-top:10px;display:none">
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-primary" onclick="startMultiAdapter()">▶ Train all adapters</button>
+            <button class="btn" onclick="clearAdapters()">✕ Clear</button>
+          </div>
+          <div class="log-panel" id="multi-adapter-log" style="margin-top:10px;max-height:220px;display:none">Waiting…</div>
+          <div id="adapter-progress-bars" style="margin-top:8px"></div>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-title">Training run</div>
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
@@ -458,6 +477,61 @@ select:focus,input:focus{outline:none;border-color:var(--blue)}
         <div id="jobs-list" style="display:flex;flex-direction:column;gap:8px">
           <div style="color:var(--text3);font-size:13px">No jobs yet — submit one above</div>
         </div>
+      </div>
+
+      <!-- Option C: LoRA merge -->
+      <div class="card" style="border-color:var(--border2)">
+        <div class="card-title" style="display:flex;align-items:center;gap:8px">
+          Merge LoRA adapters
+          <span style="font-size:10px;background:var(--purple,#a855f7)22;color:var(--purple,#a855f7);padding:2px 7px;border-radius:8px;font-weight:600">OPTION C</span>
+        </div>
+        <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Combine two trained LoRA adapters with adjustable blend weights. Works on any two adapters trained from the same base model.</div>
+        <div class="field-grid two" style="margin-bottom:10px">
+          <div class="field">
+            <label>Adapter A — path or job output</label>
+            <input type="text" id="merge-a-path" placeholder="./output/style  or  ./output/job-abc123"/>
+          </div>
+          <div class="field">
+            <label>Adapter A name</label>
+            <input type="text" id="merge-a-name" value="style"/>
+          </div>
+        </div>
+        <div class="field-grid two" style="margin-bottom:10px">
+          <div class="field">
+            <label>Adapter B — path or job output</label>
+            <input type="text" id="merge-b-path" placeholder="./output/subject  or  ./output/job-xyz789"/>
+          </div>
+          <div class="field">
+            <label>Adapter B name</label>
+            <input type="text" id="merge-b-name" value="subject"/>
+          </div>
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3)">Blend weights</label>
+          <div style="display:flex;align-items:center;gap:12px;margin-top:6px">
+            <span id="merge-a-label" style="font-size:12px;min-width:60px">A: 50%</span>
+            <input type="range" id="merge-slider" min="0" max="100" value="50" style="flex:1"
+                   oninput="updateMergeSlider(this.value)"/>
+            <span id="merge-b-label" style="font-size:12px;min-width:60px;text-align:right">B: 50%</span>
+          </div>
+        </div>
+        <div class="field-grid two" style="margin-bottom:10px">
+          <div class="field">
+            <label>Output name</label>
+            <input type="text" id="merge-output-name" value="merged"/>
+          </div>
+          <div class="field" style="align-self:end;display:flex;gap:8px">
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px">
+              <input type="checkbox" id="merge-push-hub"/> Push merged to HF Hub
+            </label>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" onclick="startMerge()">⊕ Merge adapters</button>
+          <button class="btn" onclick="fillMergeFromJobs()">↺ Pick from jobs</button>
+        </div>
+        <div class="log-panel" id="merge-log" style="margin-top:10px;max-height:200px;display:none">Waiting…</div>
+        <div id="merge-result" style="display:none;margin-top:8px;padding:8px 12px;background:var(--bg3);border-radius:var(--radius);font-size:12px"></div>
       </div>
 
       <div class="card" id="job-log-card" style="display:none">
@@ -1017,6 +1091,205 @@ fetch('/api/config/default').catch(()=>{
   document.getElementById('gpu-badge').textContent='GPU: demo mode';
 });
 
+// ── Option B: Multi-adapter ───────────────────────────────────────────────────
+
+const TARGET_MODULE_PRESETS = {
+  "q + v (recommended)": ["q_proj","v_proj"],
+  "all attention":       ["q_proj","k_proj","v_proj","out_proj"],
+  "cross-attention":     ["to_q","to_k","to_v","to_out.0"],
+  "all linear":          ["q_proj","k_proj","v_proj","out_proj","ff.net.0.proj","ff.net.2"]
+};
+
+let _adapters = [];
+
+function toggleMultiAdapter() {
+  addAdapter();
+}
+
+function addAdapter(name, rank, alpha, targets, epochs, lr) {
+  const id = 'adp-' + Date.now();
+  const idx = _adapters.length;
+  _adapters.push({id, name: name||`adapter_${idx+1}`, rank: rank||16, alpha: alpha||32,
+                  targets: targets||["q_proj","v_proj"], epochs: epochs||5, lr: lr||1e-4});
+  renderAdapters();
+}
+
+function removeAdapter(id) {
+  _adapters = _adapters.filter(a => a.id !== id);
+  renderAdapters();
+}
+
+function renderAdapters() {
+  const list = document.getElementById('adapter-list');
+  const ctrl = document.getElementById('multi-adapter-controls');
+  if (!_adapters.length) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--text3)">No adapters added yet — click "+ Add adapter"</div>';
+    ctrl.style.display = 'none'; return;
+  }
+  ctrl.style.display = 'block';
+  list.innerHTML = _adapters.map((a,i) => `
+    <div style="border:1px solid var(--border2);border-radius:var(--radius);padding:10px 12px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <div style="width:8px;height:8px;border-radius:50%;background:var(--blue);flex-shrink:0"></div>
+        <input type="text" value="${a.name}" style="flex:1;font-size:13px;font-weight:500"
+               oninput="_adapters[${i}].name=this.value"/>
+        <button class="btn" style="padding:2px 8px;font-size:11px" onclick="removeAdapter('${a.id}')">✕</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px">
+        <div class="field"><label>Rank</label>
+          <input type="number" value="${a.rank}" oninput="_adapters[${i}].rank=+this.value"/></div>
+        <div class="field"><label>Alpha</label>
+          <input type="number" value="${a.alpha}" oninput="_adapters[${i}].alpha=+this.value"/></div>
+        <div class="field"><label>Epochs</label>
+          <input type="number" value="${a.epochs}" oninput="_adapters[${i}].epochs=+this.value"/></div>
+        <div class="field"><label>LR</label>
+          <input type="text" value="${a.lr}" oninput="_adapters[${i}].lr=parseFloat(this.value)||1e-4"/></div>
+      </div>
+      <div class="field" style="margin-top:6px"><label>Target modules</label>
+        <select onchange="setAdapterTargets(${i},this.value)">
+          ${Object.entries(TARGET_MODULE_PRESETS).map(([k,v])=>
+            `<option value="${k}" ${JSON.stringify(v)===JSON.stringify(a.targets)?'selected':''}>${k}</option>`
+          ).join('')}
+        </select>
+      </div>
+    </div>`).join('');
+}
+
+function setAdapterTargets(i, presetName) {
+  _adapters[i].targets = TARGET_MODULE_PRESETS[presetName] || _adapters[i].targets;
+}
+
+function clearAdapters() { _adapters = []; renderAdapters(); }
+
+function startMultiAdapter() {
+  if (!_adapters.length) { alert('Add at least one adapter first'); return; }
+  const log = document.getElementById('multi-adapter-log');
+  const bars = document.getElementById('adapter-progress-bars');
+  log.style.display = 'block'; log.innerHTML = '';
+  bars.innerHTML = _adapters.map(a => `
+    <div style="margin-bottom:6px">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:2px">${a.name}</div>
+      <div style="height:4px;border-radius:2px;background:var(--bg3);overflow:hidden">
+        <div id="bar-${a.name}" style="height:100%;background:var(--blue);width:0%;transition:width .3s"></div>
+      </div>
+    </div>`).join('');
+
+  const body = {
+    model_id: document.getElementById('custom-model').value || selectedModel || 'black-forest-labs/FLUX.1-dev',
+    adapters: _adapters.map(a => ({
+      name: a.name, rank: a.rank, alpha: a.alpha,
+      target_modules: a.targets, epochs: a.epochs, learning_rate: a.lr
+    }))
+  };
+
+  fetch('/api/train/multi-adapter/stream', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+  }).then(async res => {
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    while (true) {
+      const {done, value} = await reader.read(); if (done) break;
+      buf += dec.decode(value, {stream:true});
+      const parts = buf.split('\n\n'); buf = parts.pop();
+      for (const chunk of parts) {
+        const lines = chunk.split('\n'); let evtName='message', data='';
+        for (const l of lines) {
+          if (l.startsWith('event: ')) evtName = l.slice(7);
+          if (l.startsWith('data: '))  data = l.slice(6);
+        }
+        if (!data) continue;
+        try {
+          const d = JSON.parse(data);
+          if (evtName === 'progress') {
+            const bar = document.getElementById('bar-' + d.adapter);
+            if (bar) bar.style.width = d.pct + '%';
+            addLog('multi-adapter-log','info',
+              `[${d.adapter}] step ${d.step}/${d.total} (${d.pct}%) loss=${d.loss}`);
+          } else if (evtName === 'done') {
+            addLog('multi-adapter-log', d.success ? 'ok' : 'error',
+              d.success ? `All adapters trained. Saved to: ${d.adapters?.map(a=>a.path).join(', ')}` : d.message);
+          } else if (evtName === 'log') {
+            addLog('multi-adapter-log', d.status||'info', d.message);
+          }
+        } catch(e) {}
+      }
+    }
+  }).catch(e => addLog('multi-adapter-log','error','Error: '+e));
+}
+
+// ── Option C: Merge ───────────────────────────────────────────────────────────
+
+function updateMergeSlider(val) {
+  const a = parseInt(val), b = 100 - a;
+  document.getElementById('merge-a-label').textContent = `A: ${a}%`;
+  document.getElementById('merge-b-label').textContent = `B: ${b}%`;
+}
+
+function fillMergeFromJobs() {
+  fetch('/api/jobs').then(r=>r.json()).then(jobs => {
+    const done = jobs.filter(j => j.status === 'done');
+    if (done.length < 2) { alert('Need at least 2 completed jobs to merge'); return; }
+    document.getElementById('merge-a-path').value = `./output/${done[0].id}`;
+    document.getElementById('merge-a-name').value = done[0].name || done[0].id;
+    document.getElementById('merge-b-path').value = `./output/${done[1].id}`;
+    document.getElementById('merge-b-name').value = done[1].name || done[1].id;
+  });
+}
+
+function startMerge() {
+  const aPath = document.getElementById('merge-a-path').value.trim();
+  const bPath = document.getElementById('merge-b-path').value.trim();
+  if (!aPath || !bPath) { alert('Enter paths for both adapters'); return; }
+
+  const slider = parseInt(document.getElementById('merge-slider').value);
+  const log = document.getElementById('merge-log');
+  const result = document.getElementById('merge-result');
+  log.style.display = 'block'; log.innerHTML = ''; result.style.display = 'none';
+
+  const body = {
+    model_id: document.getElementById('custom-model').value || selectedModel || 'black-forest-labs/FLUX.1-dev',
+    adapter_a_path: aPath,
+    adapter_b_path: bPath,
+    adapter_a_name: document.getElementById('merge-a-name').value || 'A',
+    adapter_b_name: document.getElementById('merge-b-name').value || 'B',
+    weight_a: slider / 100,
+    weight_b: (100 - slider) / 100,
+    output_name: document.getElementById('merge-output-name').value || 'merged',
+    push_to_hub: document.getElementById('merge-push-hub').checked,
+  };
+
+  fetch('/api/jobs/merge/stream', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+  }).then(async res => {
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    while (true) {
+      const {done, value} = await reader.read(); if (done) break;
+      buf += dec.decode(value, {stream:true});
+      const parts = buf.split('\n\n'); buf = parts.pop();
+      for (const chunk of parts) {
+        const lines = chunk.split('\n'); let evtName='message', data='';
+        for (const l of lines) {
+          if (l.startsWith('event: ')) evtName = l.slice(7);
+          if (l.startsWith('data: '))  data = l.slice(6);
+        }
+        if (!data) continue;
+        try {
+          const d = JSON.parse(data);
+          if (evtName === 'done') {
+            if (d.success) {
+              result.style.display = 'block';
+              result.innerHTML = `<strong>Merged →</strong> ${d.output_path}`
+                + (d.hub_url ? ` &nbsp;·&nbsp; <a href="${d.hub_url}" target="_blank">View on HF Hub ↗</a>` : '');
+            }
+            addLog('merge-log', d.success ? 'ok' : 'error', d.message);
+          } else if (evtName === 'log') {
+            addLog('merge-log', d.status||'info', d.message);
+          }
+        } catch(e) {}
+      }
+    }
+  }).catch(e => addLog('merge-log','error','Error: '+e));
+}
+
 // ── Jobs ─────────────────────────────────────────────────────────────────────
 
 const JOB_STATUS_COLOR = {
@@ -1113,6 +1386,7 @@ setInterval(()=>{ if(document.getElementById('panel-jobs').classList.contains('a
 // init
 renderModels(); renderDatasets();
 selectDeploy('hf', document.getElementById('dp-hf'));
+renderAdapters();
 loadJobs();
 </script>
 </body>
